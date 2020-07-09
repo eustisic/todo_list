@@ -6,9 +6,14 @@ require "sinatra/content_for"
 configure do 
   enable :sessions
   set :session_secret, 'secret'
+  set :erb, :escape_html => true
 end
 
 helpers do
+  def h(content)
+    Rack::Utils.escape_html(content)
+  end
+  
   def list_complete?(list)
     todos_count(list) > 0 && todos_remaining_count(list) == 0
   end
@@ -50,7 +55,7 @@ end
 
 # View all the lists
 get "/lists" do
-  @lists = session[:lists]
+  @list = session[:lists]
   erb :lists, layout: :layout
 end
 
@@ -68,40 +73,55 @@ def error_for_list_name(name)
   end
 end
 
+# Determine next id to assign to a todo list
+def next_list_id(lists)
+  max = lists.map { |list| list[:id] }.max || 0
+  max + 1
+end
+
 # Create a new list
 post "/lists" do
   list_name = params[:list_name].strip
+  id = next_list_id(session[:lists])
   
   error = error_for_list_name(list_name)
   if error
     session[:error] = error
     erb :new_list, layout: :layout
   else
-    session[:lists] << {name: list_name, todos: []}
+    session[:lists] << {id: id, name: list_name, todos: []}
     session[:success] = "The list has been created."
     redirect "/lists"
   end
 end
 
+# loads a list by a given id or else returns an error and redirects 
+def load_list(id)
+  list = session[:lists].find { |list| list[:id] == id }
+  return list if list
+
+  session[:error] = "The specified list was not found."
+  redirect "/lists"
+end
 # Information for a single to do list
 get "/lists/:id" do
   @list_id = params[:id].to_i
-  @list = session[:lists][@list_id]
+  @list = load_list(@list_id)
   erb :list_template, layout: :layout
 end
 
 # Edit an existing todo list
 get "/lists/:id/edit" do
-  id = params[:id].to_i
-  @list = session[:lists][id]
+  @list_id = params[:id].to_i
+  @list = load_list(@list_id)
   erb :edit_list
 end
 
 # Update an existing to do list
 post "/lists/:id" do
+  @list_id = params[:id].to_i
+  @list = load_list(@list_id)
   list_name = params[:list_name].strip
-  id = params[:id].to_i
-  @list = session[:lists][id]
   
   error = error_for_list_name(list_name)
   if error
@@ -110,16 +130,20 @@ post "/lists/:id" do
   else
     @list[:name] = list_name
     session[:success] = "The list has been updated."
-    redirect "/lists/#{id}"
+    redirect "/lists/#{@list_id}"
   end
 end
 
 # Delete a todo list
 post "/lists/:id/destroy" do
   id = params[:id].to_i
-  session[:lists].delete_at id
-  session[:success] = "The list has been deleted."
-  redirect "/lists"
+  session[:lists].delete_if { |list| list[:id] == id }
+  if env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
+    "/lists"
+  else
+    session[:success] = "The list has been deleted."
+    redirect "/lists"
+  end
 end
 
 # Return an error message if the name is invalid. Return nil if valid.
@@ -129,10 +153,16 @@ def error_for_todo(name)
   end
 end
 
+# Determine next id to assign to a todo list
+def next_todo_id(todos)
+  max = todos.map { |todo| todo[:id] }.max || 0
+  max + 1
+end
+
 # Add a todo item to a todo list
 post "/lists/:list_id/todos" do
   @list_id = params[:list_id].to_i
-  @list = session[:lists][@list_id]
+  @list = load_list(@list_id)
   todo = params[:todo].strip
   
   error = error_for_todo(todo)
@@ -140,31 +170,36 @@ post "/lists/:list_id/todos" do
     session[:error] = error
     erb :list_template, layout: :layout
   else
-    @list[:todos] << {name: todo, completed: false}
+    id = next_todo_id(@list[:todos]) # change later
+    @list[:todos] << {id: id, name: todo, completed: false}
     session[:success] = "The todo was added."
     redirect "/lists/#{@list_id}"
   end
 end
 
 # Delete a todo from a todo list
-post "/lists/:list_id/todos/:index/destroy" do
+post "/lists/:list_id/todos/:id/destroy" do
   @list_id = params[:list_id].to_i
-  @list = session[:lists][@list_id]
-  index = params[:index].to_i
+  @list = load_list(@list_id)
+  id = params[:id].to_i
   
-  @list[:todos].delete_at index
-  session[:success] = "Todo removed"
-  redirect "/lists/#{@list_id}"
+  @list[:todos].delete_if { |todo| todo[:id] == id }
+  if env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
+    status 204
+  else
+    session[:success] = "Todo removed"
+    redirect "/lists/#{@list_id}"
+  end
 end
 
 # Mark a single todo as completed or not completed
-post "/lists/:list_id/todos/:index" do 
+post "/lists/:list_id/todos/:id" do 
   @list_id = params[:list_id].to_i
-  @list = session[:lists][@list_id]
+  @list = load_list(@list_id)
   
-  index = params[:index].to_i
+  id = params[:id].to_i
   is_completed = params[:completed] == "true"
-  @list[:todos][index][:completed] = is_completed
+  @list[:todos].each { |todo| todo[:completed] = is_completed if todo[:id] == id }
   session[:success] = "Todo was updated."
   redirect "/lists/#{@list_id}"
 end
@@ -172,7 +207,7 @@ end
 # Mark all todo as complete
 post "/lists/:id/complete_all" do
   @id = params[:id].to_i
-  @list = session[:lists][@id]
+  @list = load_list(@id)
 
   @list[:todos].each { |todo| todo[:completed] = true }
 
